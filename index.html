@@ -1,1 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>1010 Block Puzzle</title>
+    <!-- Load Phaser 3 -->
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #1a1a2e;
+            overflow: hidden;
+            /* Prevent touch actions like scrolling to improve game feel */
+            touch-action: none; 
+        }
+        canvas {
+            display: block;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+<body>
 
+<script>
+    // --- GAME CONSTANTS ---
+    const GRID_SIZE = 10;
+    const CELL_SIZE = 50;
+    const GRID_X = 50; // Offset from left
+    const GRID_Y = 150; // Offset from top
+    const TRAY_Y = 750; // Y position for spawning shapes
+    
+    // Color palette for the shapes
+    const COLORS = [
+        0xe94560, 0x0f3460, 0x533483, 0xf9ed69, 0xf08a5d, 
+        0xb83b5e, 0x6a2c70, 0x00adb5, 0x3fc1c9, 0xfce38a
+    ];
+
+    // Tetromino & 1010 specific shapes matrices
+    const SHAPES = [
+        [[1]], // 1x1
+        [[1,1]], // 1x2
+        [[1],[1]], // 2x1
+        [[1,1,1]], // 1x3
+        [[1],[1],[1]], // 3x1
+        [[1,1,1,1]], // 1x4
+        [[1],[1],[1],[1]], // 4x1
+        [[1,1,1,1,1]], // 1x5
+        [[1],[1],[1],[1],[1]], // 5x1
+        [[1,1],[1,1]], // 2x2
+        [[1,1,1],[1,1,1],[1,1,1]], // 3x3
+        [[1,0],[1,1]], // Small L (BL)
+        [[0,1],[1,1]], // Small L (BR)
+        [[1,1],[1,0]], // Small L (TL)
+        [[1,1],[0,1]], // Small L (TR)
+        [[1,0,0],[1,0,0],[1,1,1]], // Big L (BL)
+        [[0,0,1],[0,0,1],[1,1,1]], // Big L (BR)
+        [[1,1,1],[1,0,0],[1,0,0]], // Big L (TL)
+        [[1,1,1],[0,0,1],[0,0,1]]  // Big L (TR)
+    ];
+
+    class GameScene extends Phaser.Scene {
+        constructor() {
+            super('GameScene');
+        }
+
+        create() {
+            // Generate a rounded block texture dynamically
+            const gfx = this.add.graphics();
+            gfx.fillStyle(0xffffff, 1);
+            gfx.fillRoundedRect(0, 0, CELL_SIZE - 2, CELL_SIZE - 2, 8);
+            gfx.generateTexture('block', CELL_SIZE - 2, CELL_SIZE - 2);
+            gfx.destroy();
+
+            this.score = 0;
+            this.gridData = []; // 2D array of logic
+            this.gridBlocks = []; // 2D array of actual sprites on the grid
+            this.trayShapes = []; // Shapes currently available at the bottom
+
+            // Initialize Grid arrays
+            for (let r = 0; r < GRID_SIZE; r++) {
+                this.gridData[r] = [];
+                this.gridBlocks[r] = [];
+                for (let c = 0; c < GRID_SIZE; c++) {
+                    this.gridData[r][c] = 0;
+                    this.gridBlocks[r][c] = null;
+                }
+            }
+
+            // Draw Background Grid
+            for (let r = 0; r < GRID_SIZE; r++) {
+                for (let c = 0; c < GRID_SIZE; c++) {
+                    let bgBlock = this.add.sprite(
+                        GRID_X + c * CELL_SIZE + CELL_SIZE / 2, 
+                        GRID_Y + r * CELL_SIZE + CELL_SIZE / 2, 
+                        'block'
+                    );
+                    bgBlock.setTint(0x16213e);
+                }
+            }
+
+            // Score UI
+            this.scoreText = this.add.text(300, 70, 'SCORE: 0', {
+                fontSize: '36px',
+                fontFamily: 'Arial',
+                fontStyle: 'bold',
+                color: '#ffffff'
+            }).setOrigin(0.5);
+
+            this.spawnTrayShapes();
+
+            // Drag Events
+            this.input.on('dragstart', (pointer, gameObject) => {
+                this.children.bringToTop(gameObject);
+                // Scale up and move up so the finger doesn't block the view
+                gameObject.setScale(1); 
+                gameObject.dragOffsetY = -100;
+            });
+
+            this.input.on('drag', (pointer, gameObject, dragX, dragY) => {
+                gameObject.x = dragX;
+                gameObject.y = dragY + gameObject.dragOffsetY;
+            });
+
+            this.input.on('dragend', (pointer, gameObject) => {
+                gameObject.setScale(0.6); // Scale back down
+                
+                // Calculate position relative to grid
+                let hitX = gameObject.x - GRID_X;
+                let hitY = gameObject.y - GRID_Y;
+
+                // Determine closest grid column and row
+                let col = Math.round((hitX - (gameObject.shapeWidth * CELL_SIZE) / 2) / CELL_SIZE);
+                let row = Math.round((hitY - (gameObject.shapeHeight * CELL_SIZE) / 2) / CELL_SIZE);
+
+                if (this.canPlace(gameObject.matrix, row, col)) {
+                    this.placeShape(gameObject, row, col);
+                } else {
+                    // Snap back to tray using the custom start properties
+                    this.tweens.add({
+                        targets: gameObject,
+                        x: gameObject.startX,
+                        y: gameObject.startY,
+                        duration: 200,
+                        ease: 'Back.out'
+                    });
+                }
+            });
+        }
+
+        spawnTrayShapes() {
+            this.trayShapes = [];
+            const trayPositions = [100, 300, 500]; // X coordinates for the 3 slots
+
+            for (let i = 0; i < 3; i++) {
+                let shape = this.createShape();
+                shape.x = trayPositions[i];
+                shape.y = TRAY_Y;
+                // Use startX and startY instead of originX and originY
+                shape.startX = shape.x;
+                shape.startY = shape.y;
+                shape.setScale(0.6);
+                this.trayShapes.push(shape);
+            }
+            
+            this.checkGameOver();
+        }
+
+        createShape() {
+            let matrix = Phaser.Utils.Array.GetRandom(SHAPES);
+            let color = Phaser.Utils.Array.GetRandom(COLORS);
+            let container = this.add.container(0, 0);
+            
+            let rows = matrix.length;
+            let cols = matrix[0].length;
+
+            container.matrix = matrix;
+            container.color = color;
+            container.shapeWidth = cols;
+            container.shapeHeight = rows;
+
+            // Center the container pivot based on its dimensions
+            let offsetX = (cols * CELL_SIZE) / 2;
+            let offsetY = (rows * CELL_SIZE) / 2;
+
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    if (matrix[r][c] === 1) {
+                        let block = this.add.sprite(
+                            c * CELL_SIZE - offsetX + CELL_SIZE / 2,
+                            r * CELL_SIZE - offsetY + CELL_SIZE / 2,
+                            'block'
+                        );
+                        block.setTint(color);
+                        container.add(block);
+                    }
+                }
+            }
+
+            // Make interactive
+            let hitArea = new Phaser.Geom.Rectangle(-offsetX, -offsetY, cols * CELL_SIZE, rows * CELL_SIZE);
+            container.setInteractive(hitArea, Phaser.Geom.Rectangle.Contains);
+            this.input.setDraggable(container);
+
+            return container;
+        }
+
+        canPlace(matrix, row, col) {
+            for (let r = 0; r < matrix.length; r++) {
+                for (let c = 0; c < matrix[r].length; c++) {
+                    if (matrix[r][c] === 1) {
+                        let gridR = row + r;
+                        let gridC = col + c;
+                        
+                        // Check bounds
+                        if (gridR < 0 || gridR >= GRID_SIZE || gridC < 0 || gridC >= GRID_SIZE) {
+                            return false;
+                        }
+                        // Check if occupied
+                        if (this.gridData[gridR][gridC] !== 0) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
+        placeShape(shapeObj, row, col) {
+            let matrix = shapeObj.matrix;
+            let color = shapeObj.color;
+            let blocksPlaced = 0;
+
+            for (let r = 0; r < matrix.length; r++) {
+                for (let c = 0; c < matrix[r].length; c++) {
+                    if (matrix[r][c] === 1) {
+                        let gridR = row + r;
+                        let gridC = col + c;
+                        
+                        this.gridData[gridR][gridC] = 1;
+                        
+                        // Create permanent sprite on the grid
+                        let block = this.add.sprite(
+                            GRID_X + gridC * CELL_SIZE + CELL_SIZE / 2,
+                            GRID_Y + gridR * CELL_SIZE + CELL_SIZE / 2,
+                            'block'
+                        );
+                        block.setTint(color);
+                        // Small pop animation
+                        block.setScale(0);
+                        this.tweens.add({
+                            targets: block,
+                            scale: 1,
+                            duration: 150,
+                            ease: 'Back.out'
+                        });
+                        
+                        this.gridBlocks[gridR][gridC] = block;
+                        blocksPlaced++;
+                    }
+                }
+            }
+
+            // Update Score for placement
+            this.updateScore(blocksPlaced);
+
+            // Remove from tray
+            this.trayShapes = this.trayShapes.filter(s => s !== shapeObj);
+            shapeObj.destroy();
+
+            this.checkLines();
+
+            // Refill tray if empty
+            if (this.trayShapes.length === 0) {
+                this.time.delayedCall(200, () => {
+                    this.spawnTrayShapes();
+                });
+            } else {
+                this.checkGameOver();
+            }
+        }
+
+        checkLines() {
+            let rowsToClear = [];
+            let colsToClear = [];
+
+            // Check Rows
+            for (let r = 0; r < GRID_SIZE; r++) {
+                let full = true;
+                for (let c = 0; c < GRID_SIZE; c++) {
+                    if (this.gridData[r][c] === 0) full = false;
+                }
+                if (full) rowsToClear.push(r);
+            }
+
+            // Check Columns
+            for (let c = 0; c < GRID_SIZE; c++) {
+                let full = true;
+                for (let r = 0; r < GRID_SIZE; r++) {
+                    if (this.gridData[r][c] === 0) full = false;
+                }
+                if (full) colsToClear.push(c);
+            }
+
+            let blocksToAnimate = [];
+
+            // Gather blocks to remove
+            rowsToClear.forEach(r => {
+                for (let c = 0; c < GRID_SIZE; c++) {
+                    if (this.gridData[r][c] !== 0) {
+                        blocksToAnimate.push(this.gridBlocks[r][c]);
+                        this.gridData[r][c] = 0;
+                        this.gridBlocks[r][c] = null;
+                    }
+                }
+            });
+
+            colsToClear.forEach(c => {
+                for (let r = 0; r < GRID_SIZE; r++) {
+                    if (this.gridData[r][c] !== 0) {
+                        // Prevent pushing the same block twice (intersections)
+                        if (blocksToAnimate.indexOf(this.gridBlocks[r][c]) === -1) {
+                            blocksToAnimate.push(this.gridBlocks[r][c]);
+                            this.gridData[r][c] = 0;
+                            this.gridBlocks[r][c] = null;
+                        }
+                    }
+                }
+            });
+
+            if (blocksToAnimate.length > 0) {
+                // Score for lines (combo logic can be added here)
+                let linesCleared = rowsToClear.length + colsToClear.length;
+                this.updateScore(linesCleared * 10);
+
+                // Animate destruction
+                this.tweens.add({
+                    targets: blocksToAnimate,
+                    scale: 0,
+                    alpha: 0,
+                    duration: 300,
+                    onComplete: () => {
+                        blocksToAnimate.forEach(b => { if(b) b.destroy(); });
+                        // Re-check game over as clearing lines frees up space
+                        this.checkGameOver(); 
+                    }
+                });
+            }
+        }
+
+        updateScore(points) {
+            this.score += points;
+            this.scoreText.setText('SCORE: ' + this.score);
+            
+            // Pop effect on score
+            this.tweens.add({
+                targets: this.scoreText,
+                scale: 1.2,
+                duration: 100,
+                yoyo: true
+            });
+        }
+
+        checkGameOver() {
+            if (this.trayShapes.length === 0) return;
+
+            let canMove = false;
+
+            // Brute force check: try every shape in every grid position
+            for (let s = 0; s < this.trayShapes.length; s++) {
+                let matrix = this.trayShapes[s].matrix;
+                for (let r = 0; r < GRID_SIZE; r++) {
+                    for (let c = 0; c < GRID_SIZE; c++) {
+                        if (this.canPlace(matrix, r, c)) {
+                            canMove = true;
+                            break;
+                        }
+                    }
+                    if (canMove) break;
+                }
+                if (canMove) break;
+            }
+
+            if (!canMove) {
+                this.triggerGameOver();
+            } else {
+                // If there are valid moves, make sure shapes are styled normally
+                this.trayShapes.forEach(shape => shape.setAlpha(1));
+            }
+        }
+
+        triggerGameOver() {
+            // Dim the remaining tray shapes to indicate they are useless
+            this.trayShapes.forEach(shape => shape.setAlpha(0.3));
+
+            // Overlay
+            const overlay = this.add.graphics();
+            overlay.fillStyle(0x000000, 0.7);
+            overlay.fillRect(0, 0, 600, 1000);
+
+            // Text
+            this.add.text(300, 400, 'GAME OVER', {
+                fontSize: '60px',
+                fontFamily: 'Arial',
+                fontStyle: 'bold',
+                color: '#ff4757'
+            }).setOrigin(0.5);
+
+            this.add.text(300, 480, 'Final Score: ' + this.score, {
+                fontSize: '30px',
+                fontFamily: 'Arial',
+                color: '#ffffff'
+            }).setOrigin(0.5);
+
+            // Restart Button
+            let btn = this.add.graphics();
+            btn.fillStyle(0x2ed573, 1);
+            btn.fillRoundedRect(200, 550, 200, 60, 10);
+            
+            let btnText = this.add.text(300, 580, 'RESTART', {
+                fontSize: '28px',
+                fontFamily: 'Arial',
+                fontStyle: 'bold',
+                color: '#ffffff'
+            }).setOrigin(0.5);
+
+            btn.setInteractive(new Phaser.Geom.Rectangle(200, 550, 200, 60), Phaser.Geom.Rectangle.Contains);
+            btn.on('pointerdown', () => {
+                this.scene.restart();
+            });
+        }
+    }
+
+    // --- PHASER CONFIGURATION ---
+    const config = {
+        type: Phaser.AUTO,
+        // The logical size of the game (ideal for portrait mobile)
+        width: 600,
+        height: 1000,
+        backgroundColor: '#1a1a2e',
+        scale: {
+            // Fit screen while preserving aspect ratio
+            mode: Phaser.Scale.FIT,
+            // Center the game canvas on the screen
+            autoCenter: Phaser.Scale.CENTER_BOTH
+        },
+        scene: [GameScene]
+    };
+
+    // Initialize the game when the window loads
+    window.onload = () => {
+        const game = new Phaser.Game(config);
+    };
+</script>
+</body>
+</html>
